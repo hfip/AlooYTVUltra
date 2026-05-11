@@ -3,86 +3,171 @@ import cors from "cors";
 import { load } from "cheerio";
 import fetch from "node-fetch";
 
-const app = express();
-app.use(cors());
-
+const PORT = process.env.PORT || 7000;
 const BASE_URL = "https://bp.alooytv13.xyz";
+const IMAGE_BASE = "https://bp.alooytv13.xyz";
 
+// ─── المانيفست المطور لبرنامج فورد وأومني ────────────────────────────────────
 const MANIFEST = {
-  id: "com.alooytv.ultra.v3", 
+  id: "com.alooytv.ultra.final", // معرف فريد جديد لضمان تحديث الإضافة في التطبيقات
   version: "3.5.0",
   name: "AlooYTV Ultra Pro",
-  description: "دعم فورد (Forward) وستريمو - بحث مباشر وكتالوجات رمضان 2026",
+  description: "دعم كامل لبرنامج فورد وستريمو - رمضان 2026 - بحث وكتالوجات شاملة",
   logo: "https://bp.alooytv13.xyz/favicon.ico",
   types: ["series", "movie"],
   catalogs: [
-    { id: "latest_alooy", name: "AlooYTV - أحدث الحلقات", type: "series", extra: [{ name: "search", isRequired: false }] },
-    { id: "ramadan_2026", name: "AlooYTV - رمضان 2026", type: "series" }
+    { 
+      id: "latest_episodes", 
+      name: "أحدث الحلقات", 
+      type: "series", 
+      extra: [{ name: "search", isRequired: false }, { name: "skip", isRequired: false }] 
+    },
+    { id: "ramadan_2026", name: "رمضان 2026 ★", type: "series" },
+    { id: "turki_series", name: "مسلسلات تركية", type: "series" },
+    { id: "arabic_series", name: "مسلسلات عربية", type: "series" }
   ],
   resources: ["catalog", "meta", "stream"],
-  idPrefixes: ["tt", "alooyultra:"] // هذا السطر هو مفتاح العمل في فورد وأومني
+  idPrefixes: ["tt", "alooyultra:"] // إضافة tt ضرورية للظهور في واجهة فورد الرئيسية
 };
 
-// --- محرك البحث والجلب ---
+// ─── وظائف الجلب والبحث ──────────────────────────────────────────────────────
 async function fetchHtml(url) {
   try {
     const res = await fetch(url, {
-      headers: { "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15" },
-      timeout: 7000
+      headers: {
+        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15",
+        Referer: BASE_URL,
+      },
+      timeout: 8000
     });
     return await res.text();
-  } catch (e) { return ""; }
+  } catch (err) { return ""; }
 }
 
-// --- المعالجات (Handlers) ---
-
-app.get("/manifest.json", (req, res) => res.json(MANIFEST));
-
-// الكتالوج والبحث (لبرنامج فورد)
-app.get("/catalog/:type/:id.json", async (req, res) => {
-  const query = req.query.search;
-  const html = await fetchHtml(`${BASE_URL}/tv-series.html`);
+async function getItems(url, query = "") {
+  const html = await fetchHtml(url);
+  if (!html) return [];
   const $ = load(html);
-  const metas = [];
+  const items = [];
 
-  $("img.lazy").each((_i, el) => {
+  $("img").each((_i, el) => {
     const name = $(el).attr("alt") || "";
     if (query && !name.toLowerCase().includes(query.toLowerCase())) return;
 
+    const dataSrc = $(el).attr("data-src") || $(el).attr("src") || "";
+    if (!dataSrc.includes("/uploads/video_thumb/")) return;
+
     const href = $(el).closest("a").attr("href") || "";
     const slug = href.replace(/.*\/watch\//, "").replace(".html", "");
-    const poster = $(el).attr("data-src") || $(el).attr("src");
-
-    metas.push({
-      id: `alooyultra:${slug}`,
-      type: "series",
-      name: name,
-      poster: poster.startsWith("http") ? poster : `${BASE_URL}${poster}`,
-      posterShape: "poster"
-    });
+    
+    if (slug && !items.find(i => i.slug === slug)) {
+      items.push({
+        id: `alooyultra:${slug}`,
+        name: name,
+        type: "series",
+        poster: dataSrc.startsWith("http") ? dataSrc : `${IMAGE_BASE}${dataSrc}`,
+        slug: slug
+      });
+    }
   });
-  res.json({ metas });
+  return items;
+}
+
+// ─── بناء السيرفر ────────────────────────────────────────────────────────────
+const app = express();
+app.use(cors());
+
+app.get("/manifest.json", (_req, res) => res.json(MANIFEST));
+
+// معالج الكتالوج والبحث
+app.get("/catalog/:type/:id.json", async (req, res) => {
+  const { id } = req.params;
+  const query = req.query.search;
+  
+  let url = `${BASE_URL}/tv-series.html`;
+  if (id === "ramadan_2026") url = `${BASE_URL}/genre/ramadan-arabi-2026.html`;
+  if (id === "turki_series") url = `${BASE_URL}/genre/turki.html`;
+  if (id === "arabic_series") url = `${BASE_URL}/genre/arabic.html`;
+
+  try {
+    const items = await getItems(url, query);
+    const metas = items.map(i => ({
+      id: i.id,
+      type: i.type,
+      name: i.name,
+      poster: i.poster,
+      posterShape: "poster"
+    }));
+    res.json({ metas });
+  } catch { res.json({ metas: [] }); }
 });
 
-// روابط البث (Stream)
-app.get("/stream/:type/:id.json", async (req, res) => {
+// معالج الـ Meta (لجلب قائمة الحلقات)
+app.get("/meta/:type/:id.json", async (req, res) => {
   const id = req.params.id;
   const slug = id.replace(/^(alooyultra:|tt)/, "").split(":")[0];
   
-  // محاولة جلب الرابط المباشر
   const html = await fetchHtml(`${BASE_URL}/watch/${slug}.html`);
-  const srcMatch = html.match(/<source\s+src="(https?:\/\/[^"]+\.(?:mp4|m3u8)[^"]*)"/i);
+  const $ = load(html);
   
-  const streams = [];
-  if (srcMatch) {
-    streams.push({ title: "🎬 جودة عالية - AlooYTV", url: srcMatch[1] });
-  }
-  streams.push({ title: "🌐 فتح في المتصفح", externalUrl: `${BASE_URL}/watch/${slug}.html` });
-  
-  res.json({ streams });
+  const episodes = [];
+  $("a[href*='key=']").each((_i, el) => {
+    const key = $(el).attr("href").match(/key=([^&]+)/)?.[1];
+    const text = $(el).text().trim();
+    if (key) {
+      episodes.push({
+        id: `${id}:${key}`,
+        title: text.includes("الحلقة") ? text : `الحلقة ${episodes.length + 1}`,
+        season: 1,
+        episode: episodes.length + 1,
+        released: new Date().toISOString()
+      });
+    }
+  });
+
+  res.json({
+    meta: {
+      id: id,
+      type: req.params.type,
+      name: $("h1").text().trim() || "AlooYTV Ultra Content",
+      poster: $("img[src*='/uploads/video_thumb/']").first().attr("src") || "",
+      videos: episodes.length > 0 ? episodes : [{ id: id, title: "تشغيل الفيلم/الحلقة" }]
+    }
+  });
 });
 
-// المسار الافتراضي لـ Vercel (لا تستخدم app.listen)
-app.get("/", (req, res) => res.json(MANIFEST));
+// معالج الـ Stream (استخراج الروابط المباشرة)
+app.get("/stream/:type/:id.json", async (req, res) => {
+  const id = req.params.id;
+  const cleanId = id.replace(/^(alooyultra:|tt)/, "");
+  const [slug, key] = cleanId.split(":");
+
+  const url = `${BASE_URL}/watch/${slug}.html${key ? `?key=${key}` : ""}`;
+  try {
+    const html = await fetchHtml(url);
+    const streams = [];
+
+    // البحث عن روابط m3u8 أو mp4 في الكود
+    const directMatch = html.match(/<source\s+src="(https?:\/\/[^"]+\.(?:mp4|m3u8)[^"]*)"/i);
+    if (directMatch) {
+      streams.push({
+        name: "AlooYTV Ultra",
+        title: "🎬 جودة عالية مباشرة",
+        url: directMatch[1]
+      });
+    }
+
+    // إضافة رابط المتصفح كخيار احتياطي
+    streams.push({
+      name: "AlooYTV Ultra",
+      title: "🌐 مشاهدة عبر الموقع",
+      externalUrl: url
+    });
+
+    res.json({ streams });
+  } catch { res.json({ streams: [] }); }
+});
+
+app.get("/", (_req, res) => res.send("AlooYTV Ultra is Active"));
 
 export default app;
